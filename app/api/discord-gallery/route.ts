@@ -1,7 +1,5 @@
-// app/api/discord-gallery/route.ts
 import { NextResponse } from "next/server";
 
-// Always fetch fresh
 export const revalidate = 0;
 
 type Item = { src: string; title?: string; author?: string; id: string; ts?: string };
@@ -36,35 +34,27 @@ export async function GET(req: Request) {
   const headers = { Authorization: `Bot ${token}` };
   const url = new URL(req.url);
   const debugMode = url.searchParams.get("debug") === "1";
-
   const debug: any = { channelId };
   const items: Item[] = [];
 
-  // 1) Try reading parent-channel messages (most servers use this)
+  // --- STEP 1: Try normal text channel ---
   try {
     const msgs = await fetchJson(
       `https://discord.com/api/v10/channels/${channelId}/messages?limit=100`,
       headers
     );
-
     debug.messageCount = Array.isArray(msgs) ? msgs.length : 0;
 
     for (const m of msgs ?? []) {
       const author = m?.author?.username ?? "Unknown";
       const content: string = m?.content ?? "";
 
-      // A) ATTACHMENTS — be permissive: accept if it has a URL and either content_type says "image"
-      //    OR the URL looks like an image OR it has width/height (Discord includes those for images)
       for (const a of m?.attachments ?? []) {
-        const url: string | undefined = a?.url;
+        const url = a?.url;
         const isImage =
-          !!url &&
-          (
-            a?.content_type?.startsWith?.("image/") ||
-            looksLikeImageUrl(url) ||
-            typeof a?.width === "number" || typeof a?.height === "number"
-          );
-
+          a?.content_type?.startsWith?.("image/") ||
+          looksLikeImageUrl(url) ||
+          (a?.width && a?.height);
         if (isImage && url) {
           items.push({
             src: url,
@@ -75,39 +65,45 @@ export async function GET(req: Request) {
           });
         }
       }
-
-      // B) EMBEDS with image or thumbnail
-      for (const e of m?.embeds ?? []) {
-        const eu = e?.image?.url || e?.thumbnail?.url;
-        if (eu && (looksLikeImageUrl(eu))) {
-          items.push({
-            src: eu,
-            title: e?.title || content || "Embed",
-            author,
-            id: m.id,
-            ts: m.timestamp,
-          });
-        }
-      }
-
-      // C) RAW IMAGE LINK in the text
-      const linkMatch = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
-      if (linkMatch) {
-        items.push({
-          src: linkMatch[0],
-          title: content.replace(linkMatch[0], "").trim() || "Link",
-          author,
-          id: m.id,
-          ts: m.timestamp,
-        });
-      }
     }
   } catch (e) {
-    debug.messagesError = (e as Error).message;
+    debug.textError = (e as Error).message;
   }
 
-  // 2) (Optional) If you later convert the channel to Media/Forum, you can re-enable thread scraping here.
-  //    For now, we skip it because your channel is returning 404 on /threads/active.
+  // --- STEP 2: If nothing found, try Discord Media API (for #art) ---
+  if (items.length === 0) {
+    try {
+      const mediaResp = await fetch(
+        `https://discord.com/api/v10/channels/${channelId}/messages/search?has=media`,
+        { headers }
+      );
+      if (mediaResp.ok) {
+        const data = await mediaResp.json();
+        const hits = data?.messages?.flat?.() ?? [];
+        debug.mediaHits = hits.length;
+
+        for (const m of hits) {
+          const author = m?.author?.username ?? "Unknown";
+          for (const a of m?.attachments ?? []) {
+            const url = a?.url;
+            if (url && looksLikeImageUrl(url)) {
+              items.push({
+                src: url,
+                title: m?.content || a?.filename || "Image",
+                author,
+                id: m.id,
+                ts: m.timestamp,
+              });
+            }
+          }
+        }
+      } else {
+        debug.mediaError = `Discord API ${mediaResp.status} for media endpoint`;
+      }
+    } catch (err) {
+      debug.mediaCatch = (err as Error).message;
+    }
+  }
 
   // newest first
   items.sort((a, b) => (a.id < b.id ? 1 : -1));
