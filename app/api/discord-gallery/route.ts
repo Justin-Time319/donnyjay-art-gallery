@@ -37,7 +37,7 @@ export async function GET(req: Request) {
   const debug: any = { channelId };
   const items: Item[] = [];
 
-  // --- STEP 1: Try normal text channel ---
+  // STEP 1 — Try standard text messages first
   try {
     const msgs = await fetchJson(
       `https://discord.com/api/v10/channels/${channelId}/messages?limit=100`,
@@ -46,9 +46,11 @@ export async function GET(req: Request) {
     debug.messageCount = Array.isArray(msgs) ? msgs.length : 0;
 
     for (const m of msgs ?? []) {
-      const author = m?.author?.username ?? "Unknown";
+      const author =
+        m?.author?.global_name || m?.author?.username || "Unknown";
       const content: string = m?.content ?? "";
 
+      // ATTACHMENTS (permissive detection)
       for (const a of m?.attachments ?? []) {
         const url = a?.url;
         const isImage =
@@ -65,12 +67,38 @@ export async function GET(req: Request) {
           });
         }
       }
+
+      // EMBEDS (images or thumbnails)
+      for (const e of m?.embeds ?? []) {
+        const eu = e?.image?.url || e?.thumbnail?.url;
+        if (eu && looksLikeImageUrl(eu)) {
+          items.push({
+            src: eu,
+            title: e?.title || content || "Embed",
+            author,
+            id: m.id,
+            ts: m.timestamp,
+          });
+        }
+      }
+
+      // RAW IMAGE LINKS
+      const linkMatch = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
+      if (linkMatch) {
+        items.push({
+          src: linkMatch[0],
+          title: content.replace(linkMatch[0], "").trim() || "Link",
+          author,
+          id: m.id,
+          ts: m.timestamp,
+        });
+      }
     }
   } catch (e) {
-    debug.textError = (e as Error).message;
+    debug.messagesError = (e as Error).message;
   }
 
-  // --- STEP 2: If nothing found, try Discord Media API (for #art) ---
+  // STEP 2 — If nothing found, try Discord’s media search API
   if (items.length === 0) {
     try {
       const mediaResp = await fetch(
@@ -83,7 +111,8 @@ export async function GET(req: Request) {
         debug.mediaHits = hits.length;
 
         for (const m of hits) {
-          const author = m?.author?.username ?? "Unknown";
+          const author =
+            m?.author?.global_name || m?.author?.username || "Unknown";
           for (const a of m?.attachments ?? []) {
             const url = a?.url;
             if (url && looksLikeImageUrl(url)) {
@@ -105,7 +134,7 @@ export async function GET(req: Request) {
     }
   }
 
-  // newest first
+  // Sort newest → oldest
   items.sort((a, b) => (a.id < b.id ? 1 : -1));
 
   const body = debugMode ? { items, debug } : { items };
