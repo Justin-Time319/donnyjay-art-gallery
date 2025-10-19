@@ -11,7 +11,7 @@ function looksLikeImageUrl(u?: string) {
   } catch { return false; }
 }
 
-export async function GET(request: Request) {
+export async function GET() {
   const token = process.env.DISCORD_BOT_TOKEN;
   const channelId = process.env.DISCORD_CHANNEL_ID;
 
@@ -19,87 +19,62 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing Discord env vars" }, { status: 500 });
   }
 
-  const url = `https://discord.com/api/v10/channels/${channelId}/messages?limit=100`;
+  // Step 1: fetch all active/archived threads from the channel
+  const headers = { Authorization: `Bot ${token}` };
+  const activeThreads = await fetch(`https://discord.com/api/v10/channels/${channelId}/threads/active`, { headers });
+  const archivedThreads = await fetch(`https://discord.com/api/v10/channels/${channelId}/threads/archived/public`, { headers });
 
-  const resp = await fetch(url, {
-    headers: { Authorization: `Bot ${token}` },
-    cache: "no-store",
-  });
+  const active = (await activeThreads.json())?.threads ?? [];
+  const archived = (await archivedThreads.json())?.threads ?? [];
+  const threads = [...active, ...archived];
 
-  const debug: any = { ok: resp.ok, status: resp.status, channelId };
-  if (!resp.ok) {
-    return NextResponse.json({ error: "Discord API error", ...debug }, { status: resp.status });
-  }
+  const items: any[] = [];
 
-  const messages = (await resp.json()) as any[];
-  debug.messageCount = Array.isArray(messages) ? messages.length : 0;
+  // Step 2: fetch the starter message for each thread (usually the art post)
+  for (const t of threads) {
+    const threadId = t.id;
+    try {
+      const msgResp = await fetch(`https://discord.com/api/v10/channels/${threadId}/messages?limit=1`, { headers });
+      if (!msgResp.ok) continue;
 
-  let msgWithAttachments = 0;
-  let totalAttachments = 0;
-  let msgWithEmbeds = 0;
-  let totalEmbedImages = 0;
+      const [msg] = await msgResp.json();
+      if (!msg) continue;
 
-  const items: Array<{ src: string; title?: string; author?: string; id: string; ts?: string }> = [];
+      const author = msg.author?.username ?? "Unknown";
+      const content = msg.content ?? "";
 
-  for (const m of messages || []) {
-    const author = m?.author?.username;
-    const content: string = m?.content || "";
-
-    // Attachments
-    const atts = m?.attachments ?? [];
-    if (atts.length) msgWithAttachments++;
-    totalAttachments += atts.length;
-
-    for (const a of atts) {
-      const isImage =
-        a?.content_type?.startsWith?.("image/") ||
-        looksLikeImageUrl(a?.url);
-      if (isImage && a?.url) {
-        items.push({
-          src: a.url,
-          title: content || a.filename,
-          author,
-          id: m.id,
-          ts: m.timestamp,
-        });
+      // attachments
+      for (const a of msg.attachments ?? []) {
+        if (a?.url && (a?.content_type?.startsWith("image/") || looksLikeImageUrl(a?.url))) {
+          items.push({
+            src: a.url,
+            title: content || a.filename,
+            author,
+            id: msg.id,
+            ts: msg.timestamp,
+          });
+        }
       }
-    }
 
-    // Embeds (unfurled links)
-    const embeds = m?.embeds ?? [];
-    if (embeds.length) msgWithEmbeds++;
-    for (const e of embeds) {
-      const u = e?.image?.url || e?.thumbnail?.url;
-      if (looksLikeImageUrl(u)) {
-        totalEmbedImages++;
-        items.push({
-          src: u!,
-          title: e?.title || content || "Embed",
-          author,
-          id: m.id,
-          ts: m.timestamp,
-        });
+      // embeds
+      for (const e of msg.embeds ?? []) {
+        const u = e?.image?.url || e?.thumbnail?.url;
+        if (looksLikeImageUrl(u)) {
+          items.push({
+            src: u!,
+            title: e?.title || content || "Embed",
+            author,
+            id: msg.id,
+            ts: msg.timestamp,
+          });
+        }
       }
-    }
 
-    // Image URL pasted as plain text
-    const urlMatch = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
-    if (urlMatch) {
-      items.push({
-        src: urlMatch[0],
-        title: content.replace(urlMatch[0], "").trim() || "Link",
-        author,
-        id: m.id,
-        ts: m.timestamp,
-      });
+    } catch (err) {
+      console.error("Thread fetch failed:", err);
     }
   }
 
   items.sort((a, b) => (a.id < b.id ? 1 : -1));
-  debug.stats = { msgWithAttachments, totalAttachments, msgWithEmbeds, totalEmbedImages };
-
-  const { searchParams } = new URL(request.url);
-  const includeDebug = searchParams.get("debug") === "1";
-
-  return NextResponse.json(includeDebug ? { items, debug } : { items });
+  return NextResponse.json({ items, debug: { threads: threads.length, items: items.length } });
 }
