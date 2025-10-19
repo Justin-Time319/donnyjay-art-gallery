@@ -19,6 +19,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing Discord env vars" }, { status: 500 });
   }
 
+  // NOTE: some channel types (Media/Forum) can behave differently. This still returns messages.
   const url = `https://discord.com/api/v10/channels/${channelId}/messages?limit=100`;
 
   const resp = await fetch(url, {
@@ -34,14 +35,23 @@ export async function GET(request: Request) {
   const messages = (await resp.json()) as any[];
   debug.messageCount = Array.isArray(messages) ? messages.length : 0;
 
+  let msgWithAttachments = 0;
+  let totalAttachments = 0;
+  let msgWithEmbeds = 0;
+  let totalEmbedImages = 0;
+
   const items: Array<{ src: string; title?: string; author?: string; id: string; ts?: string }> = [];
 
   for (const m of messages || []) {
     const author = m?.author?.username;
     const content: string = m?.content || "";
 
-    // 1) Attachments
-    for (const a of m?.attachments ?? []) {
+    // Attachments
+    const atts = m?.attachments ?? [];
+    if (atts.length) msgWithAttachments++;
+    totalAttachments += atts.length;
+
+    for (const a of atts) {
       const isImage =
         a?.content_type?.startsWith?.("image/") ||
         looksLikeImageUrl(a?.url);
@@ -56,12 +66,15 @@ export async function GET(request: Request) {
       }
     }
 
-    // 2) Embeds (unfurled links)
-    for (const e of m?.embeds ?? []) {
-      const url = e?.image?.url || e?.thumbnail?.url;
-      if (looksLikeImageUrl(url)) {
+    // Embeds (unfurled)
+    const embeds = m?.embeds ?? [];
+    if (embeds.length) msgWithEmbeds++;
+    for (const e of embeds) {
+      const u = e?.image?.url || e?.thumbnail?.url;
+      if (looksLikeImageUrl(u)) {
+        totalEmbedImages++;
         items.push({
-          src: url!,
+          src: u!,
           title: e?.title || content || "Embed",
           author,
           id: m.id,
@@ -70,7 +83,7 @@ export async function GET(request: Request) {
       }
     }
 
-    // 3) Fallback: image URLs pasted in the text itself
+    // Image URL pasted in text
     const urlMatch = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
     if (urlMatch) {
       items.push({
@@ -83,8 +96,10 @@ export async function GET(request: Request) {
     }
   }
 
-  // Newest first
+  // newest first
   items.sort((a, b) => (a.id < b.id ? 1 : -1));
+
+  debug.stats = { msgWithAttachments, totalAttachments, msgWithEmbeds, totalEmbedImages };
 
   const { searchParams } = new URL(request.url);
   const includeDebug = searchParams.get("debug") === "1";
