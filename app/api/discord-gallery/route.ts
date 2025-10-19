@@ -19,7 +19,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing Discord env vars" }, { status: 500 });
   }
 
-  // NOTE: some channel types (Media/Forum) can behave differently. This still returns messages.
   const url = `https://discord.com/api/v10/channels/${channelId}/messages?limit=100`;
 
   const resp = await fetch(url, {
@@ -27,7 +26,7 @@ export async function GET(request: Request) {
     cache: "no-store",
   });
 
-  const debug: any = { ok: resp.ok, status: resp.status };
+  const debug: any = { ok: resp.ok, status: resp.status, channelId };
   if (!resp.ok) {
     return NextResponse.json({ error: "Discord API error", ...debug }, { status: resp.status });
   }
@@ -66,7 +65,7 @@ export async function GET(request: Request) {
       }
     }
 
-    // Embeds (unfurled)
+    // Embeds (unfurled links)
     const embeds = m?.embeds ?? [];
     if (embeds.length) msgWithEmbeds++;
     for (const e of embeds) {
@@ -83,7 +82,7 @@ export async function GET(request: Request) {
       }
     }
 
-    // Image URL pasted in text
+    // Image URL pasted as plain text
     const urlMatch = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
     if (urlMatch) {
       items.push({
@@ -96,9 +95,7 @@ export async function GET(request: Request) {
     }
   }
 
-  // newest first
   items.sort((a, b) => (a.id < b.id ? 1 : -1));
-
   debug.stats = { msgWithAttachments, totalAttachments, msgWithEmbeds, totalEmbedImages };
 
   const { searchParams } = new URL(request.url);
