@@ -1,8 +1,15 @@
+// app/api/discord-gallery/route.ts
 import { NextResponse } from "next/server";
 
 export const revalidate = 0;
 
-type Item = { src: string; title?: string; author?: string; id: string; ts?: string };
+type Item = {
+  src: string;
+  title?: string;
+  author?: string;
+  id: string;
+  ts?: string;
+};
 
 function looksLikeImageUrl(u?: string) {
   if (!u) return false;
@@ -34,32 +41,55 @@ export async function GET(req: Request) {
   const headers = { Authorization: `Bot ${token}` };
   const url = new URL(req.url);
   const debugMode = url.searchParams.get("debug") === "1";
-  const debug: any = { channelId };
+
+  // You can tweak how deep we scan: pages * 100 messages (max 5 pages = 500 messages)
+  const pages = Math.min(Math.max(Number(url.searchParams.get("pages") || 5), 1), 5);
+
   const items: Item[] = [];
+  const debug: any = { channelId, pagesScanned: 0, messagesScanned: 0 };
 
-  // STEP 1 — Try standard text messages first
-  try {
-    const msgs = await fetchJson(
-      `https://discord.com/api/v10/channels/${channelId}/messages?limit=100`,
-      headers
-    );
-    debug.messageCount = Array.isArray(msgs) ? msgs.length : 0;
+  let before: string | undefined = undefined;
 
-    for (const m of msgs ?? []) {
+  for (let p = 0; p < pages; p++) {
+    const qs = new URLSearchParams({ limit: "100" });
+    if (before) qs.set("before", before);
+
+    let msgs: any[] = [];
+    try {
+      msgs = await fetchJson(
+        `https://discord.com/api/v10/channels/${channelId}/messages?${qs.toString()}`,
+        headers
+      );
+    } catch (e) {
+      debug.fetchError = (e as Error).message;
+      break;
+    }
+
+    if (!Array.isArray(msgs) || msgs.length === 0) break;
+
+    debug.pagesScanned = p + 1;
+    debug.messagesScanned += msgs.length;
+
+    // Next page anchor
+    before = msgs[msgs.length - 1]?.id;
+
+    for (const m of msgs) {
       const author =
         m?.author?.global_name || m?.author?.username || "Unknown";
       const content: string = m?.content ?? "";
 
-      // ATTACHMENTS (permissive detection)
+      // A) Attachments (be permissive: URL + image content_type OR image-looking URL OR width/height set)
       for (const a of m?.attachments ?? []) {
-        const url = a?.url;
+        const u = a?.url as string | undefined;
         const isImage =
-          a?.content_type?.startsWith?.("image/") ||
-          looksLikeImageUrl(url) ||
-          (a?.width && a?.height);
-        if (isImage && url) {
+          !!u &&
+          (a?.content_type?.startsWith?.("image/") ||
+            looksLikeImageUrl(u) ||
+            typeof a?.width === "number" ||
+            typeof a?.height === "number");
+        if (isImage && u) {
           items.push({
-            src: url,
+            src: u,
             title: content || a?.filename || "Attachment",
             author,
             id: m.id,
@@ -68,7 +98,7 @@ export async function GET(req: Request) {
         }
       }
 
-      // EMBEDS (images or thumbnails)
+      // B) Embeds with image/thumbnail
       for (const e of m?.embeds ?? []) {
         const eu = e?.image?.url || e?.thumbnail?.url;
         if (eu && looksLikeImageUrl(eu)) {
@@ -82,59 +112,21 @@ export async function GET(req: Request) {
         }
       }
 
-      // RAW IMAGE LINKS
-      const linkMatch = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
-      if (linkMatch) {
+      // C) Raw image link in text
+      const match = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
+      if (match) {
         items.push({
-          src: linkMatch[0],
-          title: content.replace(linkMatch[0], "").trim() || "Link",
+          src: match[0],
+          title: content.replace(match[0], "").trim() || "Link",
           author,
           id: m.id,
           ts: m.timestamp,
         });
       }
     }
-  } catch (e) {
-    debug.messagesError = (e as Error).message;
   }
 
-  // STEP 2 — If nothing found, try Discord’s media search API
-  if (items.length === 0) {
-    try {
-      const mediaResp = await fetch(
-        `https://discord.com/api/v10/channels/${channelId}/messages/search?has=media`,
-        { headers }
-      );
-      if (mediaResp.ok) {
-        const data = await mediaResp.json();
-        const hits = data?.messages?.flat?.() ?? [];
-        debug.mediaHits = hits.length;
-
-        for (const m of hits) {
-          const author =
-            m?.author?.global_name || m?.author?.username || "Unknown";
-          for (const a of m?.attachments ?? []) {
-            const url = a?.url;
-            if (url && looksLikeImageUrl(url)) {
-              items.push({
-                src: url,
-                title: m?.content || a?.filename || "Image",
-                author,
-                id: m.id,
-                ts: m.timestamp,
-              });
-            }
-          }
-        }
-      } else {
-        debug.mediaError = `Discord API ${mediaResp.status} for media endpoint`;
-      }
-    } catch (err) {
-      debug.mediaCatch = (err as Error).message;
-    }
-  }
-
-  // Sort newest → oldest
+  // newest first
   items.sort((a, b) => (a.id < b.id ? 1 : -1));
 
   const body = debugMode ? { items, debug } : { items };
