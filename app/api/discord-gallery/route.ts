@@ -52,8 +52,26 @@ export async function GET(req: Request) {
   const headers = { Authorization: `Bot ${token}` };
   const url = new URL(req.url);
   const debugMode = url.searchParams.get("debug") === "1";
-  const pages = Math.min(Math.max(Number(url.searchParams.get("pages") || 2), 1), 5);
+  const rawMode = url.searchParams.get("raw") === "1";
+  const pages = Math.min(Math.max(Number(url.searchParams.get("pages") || 1), 1), 5);
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 10), 1), 100);
 
+  // -------- RAW DIAGNOSTIC MODE --------
+  if (rawMode) {
+    try {
+      const qs = new URLSearchParams({ limit: String(limit) });
+      const msgs = await fetchJson(
+        `https://discord.com/api/v10/channels/${channelId}/messages?${qs.toString()}`,
+        headers
+      );
+      // Return exactly what Discord returned (safe—no secrets in payload)
+      return NextResponse.json({ channelId, count: Array.isArray(msgs) ? msgs.length : 0, messages: msgs });
+    } catch (e) {
+      return NextResponse.json({ channelId, error: (e as Error).message }, { status: 500 });
+    }
+  }
+
+  // -------- NORMAL PARSING MODE --------
   const items: Item[] = [];
   const debug: any = {
     channelId,
@@ -65,10 +83,9 @@ export async function GET(req: Request) {
   let before: string | undefined = undefined;
 
   for (let p = 0; p < pages; p++) {
-    // gentle rate-limit spacing when paging
-    if (p > 0) await new Promise((r) => setTimeout(r, 1200));
+    if (p > 0) await new Promise((r) => setTimeout(r, 1200)); // rate-limit friendly
 
-    const qs = new URLSearchParams({ limit: "100" });
+    const qs = new URLSearchParams({ limit: String(limit) });
     if (before) qs.set("before", before);
 
     let msgs: any[] = [];
@@ -86,18 +103,13 @@ export async function GET(req: Request) {
 
     debug.pagesScanned = p + 1;
     debug.messagesScanned += msgs.length;
-
     before = msgs[msgs.length - 1]?.id;
 
     for (const m of msgs) {
-      const author =
-        m?.author?.global_name || m?.author?.username || "Unknown";
+      const author = m?.author?.global_name || m?.author?.username || "Unknown";
       const content: string = m?.content ?? "";
 
-      // A) ATTACHMENTS — accept if any of:
-      //    - content_type starts with image/
-      //    - URL looks like image OR is on Discord CDN (some CDN URLs lack extensions)
-      //    - width/height fields exist (Discord sets them for images)
+      // A) Attachments
       for (const a of m?.attachments ?? []) {
         const u = a?.url as string | undefined;
         const isImage =
@@ -119,7 +131,7 @@ export async function GET(req: Request) {
         }
       }
 
-      // B) EMBEDS — accept image.url, image.proxy_url, thumbnail.url, thumbnail.proxy_url
+      // B) Embeds
       for (const e of m?.embeds ?? []) {
         const candidates = [
           e?.image?.url,
@@ -143,7 +155,7 @@ export async function GET(req: Request) {
         }
       }
 
-      // C) RAW IMAGE LINKS in text
+      // C) Raw links
       const match = content.match(/https?:\/\/\S+\.(png|jpe?g|gif|webp)\b/i);
       if (match) {
         items.push({
@@ -158,8 +170,6 @@ export async function GET(req: Request) {
     }
   }
 
-  // newest first
   items.sort((a, b) => (a.id < b.id ? 1 : -1));
-
   return NextResponse.json(debugMode ? { items, debug } : { items });
 }
